@@ -1,8 +1,8 @@
-# core/sheets_handler.py
-
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
 from datetime import datetime
+import os
+import json
 
 # Google Sheets に接続するクライアントを取得
 def get_client():
@@ -10,20 +10,20 @@ def get_client():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "config/credentials.json",
-        scope
-    )
+    # 環境変数からJSON文字列を読み込む
+    creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
     client = gspread.authorize(creds)
     return client
+
 
 # Tasksシートを取得（なければ手動で作成しておく）
 def get_tasks_sheet():
     client = get_client()
-    # スプレッドシート名はあなたが作った名前に合わせる
     sh = client.open("TaskManager")
     sheet = sh.worksheet("Tasks")
     return sheet
+
 
 # タスクを1件保存する（今はテキストをそのまま入れる簡易版）
 def save_task_raw(user_message: str):
