@@ -1,47 +1,63 @@
 # core/line_handler.py
-
-from flask import Blueprint, request
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from core.sheets_handler import save_task_raw
 import os
+from flask import Blueprint, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from core.sheets_handler import save_task_raw, mark_task_complete  # ← ここが超重要
+import traceback
 
 line_bp = Blueprint("line_bp", __name__)
 
-# 環境変数（Renderやローカル）に設定しておく
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-
 @line_bp.route("/callback", methods=["POST"])
 def callback():
-    """LINEからのWebhookを受け取る"""
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
-        return "Invalid signature", 400
-
-    return "OK", 200
-
+    except Exception as e:
+        print("[ERROR] handler.handle failed:", e)
+        print(traceback.format_exc())
+        abort(400)
+    return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    """LINEメッセージ受信時の処理"""
-    user_message = event.message.text
+    user_message = event.message.text.strip()
+    print(f"[INFO] incoming: {user_message}")
 
-    # スプレッドシートに記録
-    save_task_raw(user_message)
+    # 完了処理: 「完了 〇〇」
+    if user_message.startswith("完了"):
+        keyword = user_message.replace("完了", "", 1).strip()
+        try:
+            ok = mark_task_complete(keyword)
+            msg = f"✅『{keyword}』を完了にしました！" if ok else "該当タスクが見つかりませんでした。"
+            print(f"[INFO] complete: {keyword} -> {ok}")
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+        except Exception as e:
+            print("[ERROR] complete failed:", e)
+            print(traceback.format_exc())
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="完了処理でエラーが発生しました。"))
+        return
 
-    # 自動返信
-    reply_text = f"「{user_message}」を受け取りました📘"
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+    # タスク登録
+    try:
+        task_date, task_time, task_text = save_task_raw(user_message)
+        print(f"[INFO] SAVE_TASK_OK: {task_date} {task_time} {task_text}")
+        reply_text = (
+            "✅ タスク登録しました！\n"
+            f"📅 日付：{task_date}\n"
+            f"🕒 時間：{task_time or '未指定'}\n"
+            f"📝 内容：{task_text}"
+        )
+    except Exception as e:
+        print("[ERROR] save_task_raw failed:", e)
+        print(traceback.format_exc())
+        reply_text = "タスク登録でエラーが発生しました。設定を確認してください。"
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
