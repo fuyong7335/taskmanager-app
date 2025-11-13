@@ -1,61 +1,82 @@
-# core/line_handler.py
-import os, traceback
-from flask import Blueprint, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from core.sheets_handler import save_task_raw, mark_task_complete
+import os
+from sheets import add_task, mark_done, tasks_on
+from formatter import format_task_list, format_added, format_done
 
-VERSION_TAG = "line_handler v2"  # ← バージョン印
-print(f"[BOOT] {VERSION_TAG}")
 
-line_bp = Blueprint("line_bp", __name__)
+JST = pytz.timezone("Asia/Tokyo")
+app = Flask(__name__)
+CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(CHANNEL_SECRET)
 
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-@line_bp.route("/callback", methods=["POST"])
+TASK_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+)")
+HELP = (
+"📌 使い方\n"
+"・YYYY-MM-DD HH:MM タスク内容 → 追加\n"
+"・今日 → 本日のタスクを表示\n"
+"・完了 123 → ID=123を完了"
+)
+
+
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except Exception as e:
-        print("[ERROR] handler.handle failed:", e)
-        print(traceback.format_exc())
-        abort(400)
-    return "OK"
+signature = request.headers.get("X-Line-Signature")
+body = request.get_data(as_text=True)
+try:
+handler.handle(body, signature)
+except InvalidSignatureError:
+abort(400)
+return "OK"
+
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_message = event.message.text.strip()
-    print(f"[IN ] {user_message}")
+def handle_message(event: MessageEvent):
+text = (event.message.text or "").strip()
 
-    # 完了: 「完了 〇〇」
-    if user_message.startswith("完了"):
-        keyword = user_message.replace("完了", "", 1).strip()
-        try:
-            ok = mark_task_complete(keyword)
-            reply = f"✅『{keyword}』を完了にしました！" if ok else "該当タスクが見つかりませんでした。"
-        except Exception as e:
-            print("[ERROR] complete failed:", e)
-            print(traceback.format_exc())
-            reply = "完了処理でエラーが発生しました。"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
 
-    # 追加: 日付/時間/内容に分解して保存＋整形返信
-    try:
-        task_date, task_time, task_text = save_task_raw(user_message)
-        reply = (
-            "✅ タスク登録しました！\n"
-            f"📅 日付：{task_date}\n"
-            f"🕒 時間：{task_time or '未指定'}\n"
-            f"📝 内容：{task_text}"
-        )
-    except Exception as e:
-        print("[ERROR] save_task_raw failed:", e)
-        print(traceback.format_exc())
-        reply = "タスク登録でエラーが発生しました。設定を確認してください。"
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+m = TASK_PATTERN.match(text)
+if m:
+d, t, content = m.groups()
+tid = add_task(d, t, content, source="LINE")
+
+
+if isinstance(tid, str) and tid.startswith("W:"):
+exist_id = tid.split(":")[1]
+msg = f"⚠️ {d} {t} は既にID:{exist_id}のタスクがあります（ダブルブッキング回避）。"
+else:
+msg = format_added(tid, d, t, content)
+line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+return
+
+
+if text in ["今日", "きょう", "本日"]:
+today = datetime.now(JST).date()
+rows = tasks_on(today)
+msg = format_task_list(today.strftime("%Y-%m-%d"), rows)
+line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+return
+
+
+if text.startswith("完了 "):
+try:
+tid = int(text.split(" ", 1)[1])
+except ValueError:
+line_bot_api.reply_message(event.reply_token, TextSendMessage(text="IDは数値で指定してね。例：完了 12"))
+return
+ok = mark_done(tid)
+line_bot_api.reply_message(event.reply_token, TextSendMessage(text=format_done(tid, ok)))
+return
+
+
+if text in ["help", "ヘルプ", "使い方"]:
+line_bot_api.reply_message(event.reply_token, TextSendMessage(text=HELP))
+return
+
+
+line_bot_api.reply_message(event.reply_token, TextSendMessage(text="認識できませんでした。\n" + HELP))
+
+
+if __name__ == "__main__":
+app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
