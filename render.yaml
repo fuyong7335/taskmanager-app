@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: taskmanager-app-2
+    env: python
+    pythonVersion: "3.12.3"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
