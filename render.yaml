@@ -2,8 +2,6 @@ services:
   - type: web
     name: taskmanager-app
     env: python
-    plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
-    envVars:
-      PYTHON_VERSION: "3.10.12"
+    pythonVersion: "3.12.3"
